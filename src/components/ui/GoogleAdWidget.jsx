@@ -1,176 +1,183 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+
+const ADSENSE_SCRIPT_ID = "adsbygoogle-script";
+
+function normalizeClientId(value) {
+  const clientId = value?.trim();
+  if (!clientId) return undefined;
+
+  if (/^ca-pub-\d+$/.test(clientId)) return clientId;
+
+  console.warn(
+    "Google AdSense requires a web publisher id like ca-pub-1234567890."
+  );
+  return undefined;
+}
+
+function normalizeSlot(value) {
+  const slot = value?.trim();
+  if (!slot) return undefined;
+
+  const lastSegment = slot.includes("/") ? slot.split("/").pop() : slot;
+  return /^\d+$/.test(lastSegment) ? lastSegment : undefined;
+}
+
+function ensureAdsenseScript(clientId, onReady, onError) {
+  const existing = document.getElementById(ADSENSE_SCRIPT_ID);
+
+  if (existing) {
+    if (existing.dataset.loaded === "true") {
+      onReady();
+      return () => {};
+    }
+
+    existing.addEventListener("load", onReady);
+    existing.addEventListener("error", onError);
+
+    return () => {
+      existing.removeEventListener("load", onReady);
+      existing.removeEventListener("error", onError);
+    };
+  }
+
+  window.adsbygoogle = window.adsbygoogle || [];
+
+  const script = document.createElement("script");
+  script.id = ADSENSE_SCRIPT_ID;
+  script.async = true;
+  script.crossOrigin = "anonymous";
+  script.src = `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${clientId}`;
+  script.addEventListener("load", () => {
+    script.dataset.loaded = "true";
+    onReady();
+  });
+  script.addEventListener("error", onError);
+  document.head.appendChild(script);
+
+  return () => {
+    script.removeEventListener("load", onReady);
+    script.removeEventListener("error", onError);
+  };
+}
 
 export default function GoogleAdWidget({
   type = "banner",
   className = "",
   label = "Sponsored",
-  rewardDescription = "Earn a reward for watching this ad.",
+  rewardDescription = "Unlock a seasonal market tip.",
   onRewardComplete,
 }) {
-  const rawAppId = import.meta.env.VITE_GOOGLE_ADSENSE_CLIENT?.trim();
-  const rawBannerSlot = import.meta.env.VITE_GOOGLE_ADSENSE_SLOT?.trim();
-  const rawNativeInlineSlot = import.meta.env.VITE_GOOGLE_ADSENSE_NATIVE_INLINE_SLOT?.trim();
-  const rawRewardedSlot = import.meta.env.VITE_GOOGLE_ADSENSE_REWARDED_SLOT?.trim();
-
-  // Normalize appId so both AdMob-style and AdSense-style values work perfectly
-  const appId = useMemo(() => {
-    if (!rawAppId) return undefined;
-    let id = rawAppId;
-    if (id.includes("~")) id = id.split("~")[0];
-    id = id.replace("ca-app-pub-", "ca-pub-");
-    if (!id.startsWith("ca-pub-")) {
-      console.warn("Unexpected Ad client id format:", rawAppId);
-    }
-    return id;
-  }, [rawAppId]);
-
-  const normalizeSlot = (s) => {
-    if (!s) return undefined;
-    if (s.includes("/")) return s.split("/").pop();
-    return s;
-  };
-
-  const bannerSlot = useMemo(() => normalizeSlot(rawBannerSlot), [rawBannerSlot]);
-  const nativeInlineSlot = useMemo(() => normalizeSlot(rawNativeInlineSlot), [rawNativeInlineSlot]);
-  const rewardedSlot = useMemo(() => normalizeSlot(rawRewardedSlot), [rawRewardedSlot]);
-  
-  const [loaded, setLoaded] = useState(false);
+  const adRef = useRef(null);
+  const [status, setStatus] = useState("idle");
   const [rewardUnlocked, setRewardUnlocked] = useState(false);
 
-  const slotId = useMemo(() => {
-    if (type === "native") return nativeInlineSlot;
-    if (type === "rewarded") return rewardedSlot;
-    return bannerSlot;
-  }, [bannerSlot, nativeInlineSlot, rewardedSlot, type]);
+  const clientId = useMemo(
+    () => normalizeClientId(import.meta.env.VITE_GOOGLE_ADSENSE_CLIENT),
+    []
+  );
+
+  const bannerSlot = useMemo(
+    () => normalizeSlot(import.meta.env.VITE_GOOGLE_ADSENSE_SLOT),
+    []
+  );
+  const nativeSlot = useMemo(
+    () => normalizeSlot(import.meta.env.VITE_GOOGLE_ADSENSE_NATIVE_INLINE_SLOT),
+    []
+  );
+
+  const slotId = type === "native" ? nativeSlot : bannerSlot;
+  const isNative = type === "native";
+  const isRewarded = type === "rewarded";
 
   useEffect(() => {
-    if (!appId || !slotId) {
-      setLoaded(false);
-      return;
+    if (!clientId || !slotId || isRewarded) {
+      setStatus("idle");
+      return undefined;
     }
 
-    // 1. Inject script tag globally if it doesn't exist yet
-    const scriptId = "adsbygoogle-script";
-    if (!document.getElementById(scriptId)) {
-      const script = document.createElement("script");
-      script.id = scriptId;
-      script.async = true;
-      script.src = `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${appId}`;
-      script.crossOrigin = "anonymous";
-      document.head.appendChild(script);
-    }
+    let cancelled = false;
 
-    // 2. Core Fix: Push the initialization object specifically for THIS instance slot container
-    let isMounted = true;
-    const checkAndPush = () => {
-      if (window.adsbygoogle) {
-        try {
-          (window.adsbygoogle = window.adsbygoogle || []).push({});
-          if (isMounted) setLoaded(true);
-        } catch (error) {
-          console.warn("Google Ads instance registration delayed:", error.message || error);
-        }
-        return true;
+    const renderAd = () => {
+      if (cancelled || !adRef.current) return;
+
+      if (adRef.current.dataset.adsbygoogleStatus === "done") {
+        setStatus("loaded");
+        return;
       }
-      return false;
+
+      try {
+        (window.adsbygoogle = window.adsbygoogle || []).push({});
+        setStatus("loaded");
+      } catch (error) {
+        console.warn("Google AdSense slot registration failed:", error);
+        setStatus("error");
+      }
     };
 
-    // Run immediately if window object is ready, otherwise start interval polling
-    if (!checkAndPush()) {
-      const interval = window.setInterval(() => {
-        if (checkAndPush()) {
-          window.clearInterval(interval);
-        }
-      }, 200);
-
-      return () => {
-        isMounted = false;
-        window.clearInterval(interval);
-      };
-    }
+    setStatus("loading");
+    const cleanup = ensureAdsenseScript(
+      clientId,
+      renderAd,
+      () => !cancelled && setStatus("error")
+    );
 
     return () => {
-      isMounted = false;
+      cancelled = true;
+      cleanup();
     };
-  }, [appId, slotId]);
+  }, [clientId, isRewarded, slotId]);
 
-  // Fallback HUD when parameters are missing or incorrect
-  if (!appId || !slotId) {
+  if (!clientId || !slotId) {
     return (
       <div className={`rounded-2xl border border-orange-200 bg-orange-50 p-4 text-sm text-orange-900 shadow-sm dark:border-orange-900/40 dark:bg-orange-950/30 dark:text-orange-200 ${className}`}>
         <p className="text-[11px] font-black uppercase tracking-[0.2em] text-orange-600 dark:text-orange-400">{label}</p>
         <p className="mt-1 font-semibold">Local market spotlight</p>
-        <p className="mt-1 text-xs opacity-80">Provide configuration key variables to enable ad delivery loops.</p>
+        <p className="mt-1 text-xs opacity-80">Add valid Vercel AdSense variables to enable live ads.</p>
       </div>
     );
   }
 
-  if (type === "native") {
+  if (isRewarded) {
     return (
-      <div className={`rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900 transition-colors ${className}`}>
-        <p className="mb-2 text-[11px] font-black uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">{label} • Native</p>
-        <ins
-          className="adsbygoogle"
-          style={{ display: "block", textAlign: "center" }}
-          data-ad-client={appId}
-          data-ad-slot={slotId}
-          data-ad-format="autorelaxed"
-        />
-        {!loaded && <p className="mt-2 text-xs text-slate-400 animate-pulse">Loading native feed asset…</p>}
-      </div>
-    );
-  }
-
-  if (type === "rewarded") {
-    return (
-      <div className={`rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900 shadow-sm dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-200 transition-all ${className}`}>
-        <p className="text-[11px] font-black uppercase tracking-[0.2em] text-emerald-600 dark:text-emerald-400">{label} • Rewarded</p>
+      <div className={`rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900 shadow-sm transition-all dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-200 ${className}`}>
+        <p className="text-[11px] font-black uppercase tracking-[0.2em] text-emerald-600 dark:text-emerald-400">{label}</p>
         <p className="mt-1 font-semibold">{rewardDescription}</p>
-        
-        <div className="my-2 min-h-[60px] relative">
-          <ins
-            className="adsbygoogle"
-            style={{ display: "block" }}
-            data-ad-client={appId}
-            data-ad-slot={slotId}
-            data-ad-format="rewarded"
-          />
-          {!loaded && <p className="text-xs opacity-75 animate-pulse">Connecting to reward ad pool…</p>}
-        </div>
-
+        <p className="mt-2 text-xs opacity-75">Web AdSense does not support this rewarded-ad format directly, so this card keeps the reward flow separate from ad delivery.</p>
         <button
           type="button"
           onClick={() => {
             setRewardUnlocked(true);
             onRewardComplete?.();
           }}
-          className="mt-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-bold text-white hover:bg-emerald-700 transition-all shadow-xs"
+          className="mt-3 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-bold text-white shadow-sm transition-all hover:bg-emerald-700"
         >
-          {rewardUnlocked ? "✓ Reward unlocked" : "Claim reward tip"}
+          {rewardUnlocked ? "Reward unlocked" : "Unlock market tip"}
         </button>
-        
-        {rewardUnlocked && (
-          <p className="mt-3 text-xs font-semibold text-emerald-700 dark:text-emerald-400 border-t border-emerald-200/60 dark:border-emerald-900/40 pt-2 animate-in slide-in-from-top-2">
-            💡 Reward unlocked — seasonal regional tip updated on dashboard parameters!
-          </p>
-        )}
       </div>
     );
   }
 
-  // Fallback to standard banner rendering framework configuration
   return (
-    <div className={`rounded-2xl border border-slate-200 bg-white p-3 shadow-sm dark:border-slate-800 dark:bg-slate-900 transition-colors ${className}`}>
-      <p className="mb-2 text-[11px] font-black uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">{label} • Banner</p>
+    <div className={`rounded-2xl border border-slate-200 bg-white p-3 shadow-sm transition-colors dark:border-slate-800 dark:bg-slate-900 ${className}`}>
+      <p className="mb-2 text-[11px] font-black uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+        {label} - {isNative ? "Native" : "Banner"}
+      </p>
       <ins
+        ref={adRef}
         className="adsbygoogle"
-        style={{ display: "block" }}
-        data-ad-client={appId}
+        style={{ display: "block", textAlign: "center" }}
+        data-ad-client={clientId}
         data-ad-slot={slotId}
-        data-ad-format="auto"
-        data-full-width-responsive="true"
+        data-ad-format={isNative ? "fluid" : "auto"}
+        data-ad-layout={isNative ? "in-article" : undefined}
+        data-full-width-responsive={isNative ? undefined : "true"}
       />
-      {!loaded && <p className="mt-2 text-xs text-slate-400 animate-pulse">Loading ad banner framing…</p>}
+      {status === "loading" && (
+        <p className="mt-2 text-xs text-slate-400">Loading ad slot...</p>
+      )}
+      {status === "error" && (
+        <p className="mt-2 text-xs text-slate-400">Ad slot unavailable.</p>
+      )}
     </div>
   );
 }

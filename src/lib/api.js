@@ -1,6 +1,18 @@
 import { supabase } from "./supabaseClient";
 
-const BASE_URL = import.meta.env.VITE_API_URL || "/api";
+function normalizeApiBase(rawUrl) {
+  const fallback = "/api";
+  const value = rawUrl?.trim() || fallback;
+  const withoutTrailingSlash = value.replace(/\/+$/, "");
+
+  if (!withoutTrailingSlash) return fallback;
+  if (withoutTrailingSlash.endsWith("/api")) return withoutTrailingSlash;
+  if (withoutTrailingSlash === "/api") return withoutTrailingSlash;
+
+  return `${withoutTrailingSlash}/api`;
+}
+
+const BASE_URL = normalizeApiBase(import.meta.env.VITE_API_URL);
 
 /**
  * Utility function to handle network requests requiring bearer authentication.
